@@ -1,0 +1,21 @@
+{
+  "default_directory": "/home/me/projects",
+  "remotes": [
+    {
+      "name": "my-server",
+      "host": "example.com",
+      "directory": "/home/me/projects",
+      "username": "me",
+      "key": "~/.ssh/id_ed25519",
+      "port": 22
+    },
+    {
+      "name": "backup-box",
+      "host": "192.168.1.100",
+      "directory": "/backup/upload",
+      "username": "backup",
+      "key": "~/.ssh/backup_key",
+      "port": 22
+    }
+  ]
+}
