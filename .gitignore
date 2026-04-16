@@ -1,1 +1,8 @@
+build/
+*.egg-info
+__pycache__
+*.example
+.claude
+CLAUDE.md
 remotes.json
+.remwork_allocation
