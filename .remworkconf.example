@@ -1,0 +1,27 @@
+{
+  "remote": "my-server",
+  "folder": "my-project",
+  "upload": {
+    "exclude": ["*.pyc", "__pycache__", "*.egg-info"],
+    "dry_run": false
+  },
+  "allocate": {
+    "account": "my-project-account",
+    "partition": "gpu",
+    "nodes": 1,
+    "gpus": 4,
+    "gpus_per_node": 4,
+    "ntasks_per_node": 4,
+    "time": "2:00:00",
+    "job_name": "my-project",
+    "cpus_per_task": 8,
+    "mem": "32G"
+  },
+  "container": {
+    "image": "nvcr.io/nvidia/pytorch:24.01-py3",
+    "name": "my-env",
+    "mounts": ["/data:/data", "/home/me/projects:/workspace"],
+    "env": ["NCCL_DEBUG=INFO"],
+    "setup_script": "/workspace/my-project/setup_env.sh"
+  }
+}
