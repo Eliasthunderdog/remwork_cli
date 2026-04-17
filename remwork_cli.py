@@ -104,6 +104,24 @@ def save_allocation(remote_name: str, job_id: str) -> None:
         json.dump(allocs, f, indent=2)
 
 
+def save_allocation_meta(
+    remote_name: str, nodelist: List[str], master: str,
+) -> None:
+    """Attach resolved nodelist + master hostname to an existing allocation."""
+    allocs = load_all_allocations()
+    if remote_name not in allocs:
+        return
+    allocs[remote_name]["nodelist"] = nodelist
+    allocs[remote_name]["master"] = master
+    with open(_allocation_path(), "w") as f:
+        json.dump(allocs, f, indent=2)
+
+
+def load_master(remote_name: str) -> Optional[str]:
+    """Return the cached master hostname for a remote, or None."""
+    return load_all_allocations().get(remote_name, {}).get("master")
+
+
 def clear_allocation(remote_name: str) -> None:
     """Remove the allocation entry for a remote. Delete the file if empty."""
     allocs = load_all_allocations()
@@ -243,6 +261,47 @@ def query_job_state(remote: dict, job_id: str) -> Optional[str]:
         return None
     # squeue may return multiple lines for job arrays; take the first
     return state.splitlines()[0].strip()
+
+
+def fetch_nodelist(remote: dict, job_id: str) -> Optional[List[str]]:
+    """Resolve the actual hostnames for a RUNNING job via `srun hostname`.
+
+    Returns a sorted, deduplicated list, or None on failure. Uses
+    --overlap so it doesn't conflict with other steps on the allocation.
+    """
+    cmd = (
+        f"srun --jobid={shlex.quote(job_id)} --overlap "
+        f"--ntasks-per-node=1 hostname"
+    )
+    result = _ssh_run_capture(remote, cmd)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    names = sorted({ln.strip() for ln in result.stdout.splitlines() if ln.strip()})
+    return names or None
+
+
+def ensure_nodelist_cached(
+    remote: dict, remote_name: str, job_id: str,
+) -> Optional[str]:
+    """Ensure the allocation entry has a cached nodelist + master; return master.
+
+    Lazy-fetches if not already cached. Non-fatal on failure.
+    """
+    cached = load_all_allocations().get(remote_name, {})
+    if cached.get("master"):
+        return cached["master"]
+    nodes = fetch_nodelist(remote, job_id)
+    if not nodes:
+        print(
+            f"Warning: could not resolve nodelist for job {job_id}; "
+            "REM_MASTER will not be set.",
+            file=sys.stderr,
+        )
+        return None
+    master = nodes[0]
+    save_allocation_meta(remote_name, nodes, master)
+    print(f"Nodelist for job {job_id}: {', '.join(nodes)} (master={master})")
+    return master
 
 
 def _check_stale_allocation(remote: dict, remote_name: str, job_id: str) -> Optional[str]:
@@ -578,10 +637,12 @@ def allocate(
 
     if state_str in _SLURM_RUNNING_STATES:
         print(f"Job {job_id} on '{name}': RUNNING. Ready for 'run'.")
+        ensure_nodelist_cached(remote, name, job_id)
     elif state_str in _SLURM_QUEUED_STATES:
         print(f"Job {job_id} on '{name}': {state_str} (queued).")
         if wait:
             wait_for_running(remote, job_id, name)
+            ensure_nodelist_cached(remote, name, job_id)
             print(f"Job {job_id} is now RUNNING. Ready for 'run'.")
         else:
             print("Use 'remwork-cli status' to check, or pass --wait to block until running.")
@@ -591,12 +652,18 @@ def allocate(
 
 # ── setup (enroot container) ────────────────────────────────────────────────
 
-def _build_enroot_start_cmd(container_conf: dict, user_cmd: List[str]) -> str:
+def _build_enroot_start_cmd(
+    container_conf: dict,
+    user_cmd: List[str],
+    extra_env: Optional[List[str]] = None,
+) -> str:
     """Build a shell-safe enroot start command string."""
     parts = ["enroot", "start", "--rw"]
     for m in container_conf.get("mounts", []):
         parts.extend(["--mount", m])
     for e in container_conf.get("env", []):
+        parts.extend(["--env", e])
+    for e in extra_env or []:
         parts.extend(["--env", e])
     parts.append(container_conf["name"])
     parts.extend(user_cmd)
@@ -677,6 +744,8 @@ def setup_container(
     data = load_config(config_path)
     remote = find_remote(name, data)
     _require_running_allocation(remote, name, job_id)
+    master = ensure_nodelist_cached(remote, name, job_id)
+    extra_env = [f"REM_MASTER={master}"] if master else None
 
     # Use the remote's directory setting to store the sqsh image
     remote_dir = get_remote_directory(remote, data)
@@ -736,6 +805,7 @@ def setup_container(
         enroot_cmd = _build_enroot_start_cmd(
             {"name": container_name, "mounts": mounts, "env": env_vars},
             [setup_script],
+            extra_env=extra_env,
         )
         rc = _ssh_run_interactive(remote, f"{srun_pfx} {enroot_cmd}")
         if rc != 0:
@@ -813,6 +883,8 @@ def run_cmd(
         )
         sys.exit(1)
 
+    master = ensure_nodelist_cached(remote, name, job_id)
+
     # Resolve the working directory for the command.
     # Inside a container the remote directory is mounted at /workspace,
     # so the project lives at /workspace/<folder>.
@@ -835,18 +907,32 @@ def run_cmd(
     # Build the user command, prepending cd if we have a working dir.
     # The cd must happen in the same shell context as the command — i.e.
     # *inside* the container when enroot is used, not outside it.
+    # When not using a container, REM_MASTER is exported here too (for
+    # containerized runs it's forwarded via --env on enroot start below).
+    host_prefix = (
+        f"export REM_MASTER={shlex.quote(master)} && "
+        if master and not use_container
+        else ""
+    )
     if workdir:
         shell_cmd = (
-            f"cd {shlex.quote(workdir)} && "
+            host_prefix
+            + f"cd {shlex.quote(workdir)} && "
             + " ".join(shlex.quote(a) for a in user_cmd)
         )
+        actual_cmd = ["bash", "-c", shell_cmd]
+    elif host_prefix:
+        shell_cmd = host_prefix + " ".join(shlex.quote(a) for a in user_cmd)
         actual_cmd = ["bash", "-c", shell_cmd]
     else:
         actual_cmd = list(user_cmd)
 
     # Wrap in enroot container if configured
     if use_container:
-        effective_cmd = _build_enroot_start_cmd(container_conf, actual_cmd)
+        extra_env = [f"REM_MASTER={master}"] if master else None
+        effective_cmd = _build_enroot_start_cmd(
+            container_conf, actual_cmd, extra_env=extra_env,
+        )
         display = f"(container: {container_conf['name']}) {' '.join(user_cmd)}"
     else:
         effective_cmd = " ".join(shlex.quote(a) for a in actual_cmd)
