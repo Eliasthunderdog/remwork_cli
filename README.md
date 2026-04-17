@@ -127,6 +127,7 @@ cp .remworkconf.example .remworkconf
 | `upload.dry_run` | Default to dry-run mode for uploads |
 | `allocate.*` | Default Slurm parameters (see [Allocating resources](#allocating-resources)) |
 | `container.*` | Container configuration (see [Setting up containers](#setting-up-containers)) |
+| `remotes.<name>.*` | Per-remote config (see [Per-remote profiles](#per-remote-profiles)) |
 
 With `.remworkconf` in place, most commands need zero arguments:
 
@@ -135,6 +136,59 @@ remwork-cli upload
 remwork-cli allocate
 remwork-cli setup
 remwork-cli run -- python train.py
+```
+
+### Per-remote profiles
+
+When working with multiple remotes that need different Slurm params or container setups, add a `remotes` dict. Each key is a remote name with its own `folder`, `allocate`, `container`, and `upload` config:
+
+```json
+{
+  "remote": "dgx-a",
+  "remotes": {
+    "dgx-a": {
+      "folder": "my-project",
+      "allocate": {
+        "account": "team-a",
+        "partition": "gpu",
+        "nodes": 1,
+        "gpus-per-node": 4,
+        "time": "2:00:00"
+      },
+      "container": {
+        "image": "nvcr.io/nvidia/pytorch:24.01-py3",
+        "name": "my-env",
+        "mounts": ["/data:/data", "/home/me/projects:/workspace"],
+        "setup_script": "/workspace/my-project/setup_env.sh"
+      }
+    },
+    "dgx-b": {
+      "folder": "my-project",
+      "allocate": {
+        "account": "team-b",
+        "partition": "batch",
+        "nodes": 2,
+        "gpus-per-node": 8,
+        "time": "8:00:00"
+      },
+      "container": {
+        "image": "nvcr.io/nvidia/nemo:24.01",
+        "name": "nemo-env",
+        "mounts": ["/lustre:/data", "/home/me/projects:/workspace"],
+        "setup_script": "/workspace/my-project/setup_nemo.sh"
+      }
+    }
+  }
+}
+```
+
+When a remote has an entry under `remotes`, that entry is used as-is — the top-level `allocate`/`container`/`upload` sections are ignored for that remote. Remotes without an entry still fall back to the top-level config.
+
+```bash
+remwork-cli allocate dgx-a    # uses remotes.dgx-a.allocate
+remwork-cli allocate dgx-b    # uses remotes.dgx-b.allocate
+remwork-cli setup dgx-a       # uses remotes.dgx-a.container
+remwork-cli run dgx-b -- python train.py  # uses remotes.dgx-b.container
 ```
 
 ## Uploading code

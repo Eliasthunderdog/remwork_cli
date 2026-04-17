@@ -56,6 +56,23 @@ def resolve_remote(remote_name: Optional[str], ws: dict) -> str:
     return name
 
 
+def _resolve_workspace_for_remote(ws: dict, remote_name: str) -> dict:
+    """Return the effective workspace config for a specific remote.
+
+    If .remworkconf has a "remotes" dict with an entry for remote_name,
+    that entry is used as the workspace config. Otherwise falls back to
+    the top-level config.
+    """
+    per_remote = ws.get("remotes", {}).get(remote_name)
+    if per_remote is None:
+        return ws
+    result = {"remote": remote_name}
+    for key in ("folder", "allocate", "container", "upload"):
+        if key in per_remote:
+            result[key] = per_remote[key]
+    return result
+
+
 # ── Allocation state (.remwork_allocation) ───────────────────────────────────
 
 def _allocation_path() -> str:
@@ -353,6 +370,7 @@ def upload(
     """Upload current (or given) directory to the named remote via rsync."""
     ws = load_workspace_config()
     name = resolve_remote(remote_name, ws)
+    ws = _resolve_workspace_for_remote(ws, name)
     folder = folder or ws.get("folder")
 
     upload_conf = ws.get("upload", {})
@@ -389,6 +407,7 @@ def upload(
 def _build_slurm_resource_args(
     partition: Optional[str] = None,
     account: Optional[str] = None,
+    qos: Optional[str] = None,
     nodes: Optional[int] = None,
     gpus: Optional[int] = None,
     gpus_per_node: Optional[int] = None,
@@ -405,6 +424,8 @@ def _build_slurm_resource_args(
         args.extend(["--partition", partition])
     if account:
         args.extend(["--account", account])
+    if qos:
+        args.extend(["--qos", qos])
     if nodes is not None:
         args.extend(["--nodes", str(nodes)])
     if gpus is not None:
@@ -430,6 +451,7 @@ def _resolve_slurm_params(
     ws: dict,
     partition: Optional[str],
     account: Optional[str],
+    qos: Optional[str],
     nodes: Optional[int],
     gpus: Optional[int],
     gpus_per_node: Optional[int],
@@ -442,30 +464,39 @@ def _resolve_slurm_params(
 ) -> dict:
     """Merge CLI args over .remworkconf allocate defaults."""
     alloc_conf = ws.get("allocate", {})
+
+    def _get(key: str):
+        """Look up key in alloc_conf, accepting both underscore and hyphen forms."""
+        val = alloc_conf.get(key)
+        if val is None:
+            val = alloc_conf.get(key.replace("_", "-"))
+        return val
+
     return {
-        "partition": partition or alloc_conf.get("partition"),
-        "account": account or alloc_conf.get("account"),
-        "nodes": nodes if nodes is not None else alloc_conf.get("nodes"),
-        "gpus": gpus if gpus is not None else alloc_conf.get("gpus"),
+        "partition": partition or _get("partition"),
+        "account": account or _get("account"),
+        "qos": qos or _get("qos"),
+        "nodes": nodes if nodes is not None else _get("nodes"),
+        "gpus": gpus if gpus is not None else _get("gpus"),
         "gpus_per_node": (
             gpus_per_node
             if gpus_per_node is not None
-            else alloc_conf.get("gpus_per_node")
+            else _get("gpus_per_node")
         ),
         "ntasks_per_node": (
             ntasks_per_node
             if ntasks_per_node is not None
-            else alloc_conf.get("ntasks_per_node")
+            else _get("ntasks_per_node")
         ),
-        "time_limit": time_limit or alloc_conf.get("time"),
-        "job_name": job_name or alloc_conf.get("job_name"),
+        "time_limit": time_limit or _get("time"),
+        "job_name": job_name or _get("job_name"),
         "cpus_per_task": (
             cpus_per_task
             if cpus_per_task is not None
-            else alloc_conf.get("cpus_per_task")
+            else _get("cpus_per_task")
         ),
-        "mem": mem or alloc_conf.get("mem"),
-        "extra_args": extra_args or alloc_conf.get("extra_args"),
+        "mem": mem or _get("mem"),
+        "extra_args": extra_args or _get("extra_args"),
     }
 
 
@@ -475,6 +506,7 @@ def allocate(
     wait: bool = False,
     partition: Optional[str] = None,
     account: Optional[str] = None,
+    qos: Optional[str] = None,
     nodes: Optional[int] = None,
     gpus: Optional[int] = None,
     gpus_per_node: Optional[int] = None,
@@ -493,6 +525,7 @@ def allocate(
     """
     ws = load_workspace_config()
     name = resolve_remote(remote_name, ws)
+    ws = _resolve_workspace_for_remote(ws, name)
 
     data = load_config(config_path)
     remote = find_remote(name, data)
@@ -516,7 +549,7 @@ def allocate(
         print(f"Previous allocation (job {existing}) is no longer active, cleaned up.")
 
     params = _resolve_slurm_params(
-        ws, partition, account, nodes, gpus, gpus_per_node,
+        ws, partition, account, qos, nodes, gpus, gpus_per_node,
         ntasks_per_node, time_limit, job_name,
         cpus_per_task, mem, extra_args,
     )
@@ -608,6 +641,7 @@ def setup_container(
     """Import an enroot container image, create it, and run an optional setup script."""
     ws = load_workspace_config()
     name = resolve_remote(remote_name, ws)
+    ws = _resolve_workspace_for_remote(ws, name)
     container_conf = ws.get("container", {})
 
     image = image or container_conf.get("image")
@@ -726,6 +760,7 @@ def run_cmd(
     """Run a command on an existing Slurm allocation via srun."""
     ws = load_workspace_config()
     name = resolve_remote(remote_name, ws)
+    ws = _resolve_workspace_for_remote(ws, name)
 
     if not job_id:
         job_id = load_allocation(name)
@@ -1093,6 +1128,7 @@ def _add_slurm_flags(parser: argparse.ArgumentParser) -> None:
     """Add the common Slurm resource flags to a subparser."""
     parser.add_argument("--partition", "-p", metavar="PART", help="Slurm partition")
     parser.add_argument("--account", "-A", metavar="ACCT", help="Slurm account/project")
+    parser.add_argument("--qos", "-q", metavar="QOS", help="Slurm QOS")
     parser.add_argument("--nodes", "-N", type=int, metavar="N", help="Number of nodes")
     parser.add_argument(
         "--gpus", "-G", type=int, metavar="N", help="Number of GPUs (--gres=gpu:N)"
@@ -1225,6 +1261,7 @@ def main() -> None:
             wait=a.wait,
             partition=a.partition,
             account=a.account,
+            qos=a.qos,
             nodes=a.nodes,
             gpus=a.gpus,
             gpus_per_node=a.gpus_per_node,

@@ -1,5 +1,5 @@
 {
-  "remote": "my-server",
+  "remote": "dgx-a",
   "folder": "my-project",
   "upload": {
     "exclude": ["*.pyc", "__pycache__", "*.egg-info"],
@@ -23,5 +23,43 @@
     "mounts": ["/data:/data", "/home/me/projects:/workspace"],
     "env": ["NCCL_DEBUG=INFO"],
     "setup_script": "/workspace/my-project/setup_env.sh"
+  },
+  "remotes": {
+    "dgx-a": {
+      "folder": "my-project",
+      "allocate": {
+        "account": "team-a",
+        "partition": "gpu",
+        "nodes": 1,
+        "gpus-per-node": 4,
+        "time": "2:00:00",
+        "job_name": "train-a"
+      },
+      "container": {
+        "image": "nvcr.io/nvidia/pytorch:24.01-py3",
+        "name": "my-env",
+        "mounts": ["/data:/data", "/home/me/projects:/workspace"],
+        "env": ["NCCL_DEBUG=INFO"],
+        "setup_script": "/workspace/my-project/setup_env.sh"
+      }
+    },
+    "dgx-b": {
+      "folder": "my-project",
+      "allocate": {
+        "account": "team-b",
+        "partition": "batch",
+        "nodes": 2,
+        "gpus-per-node": 8,
+        "time": "8:00:00",
+        "job_name": "train-b"
+      },
+      "container": {
+        "image": "nvcr.io/nvidia/nemo:24.01",
+        "name": "nemo-env",
+        "mounts": ["/lustre:/data", "/home/me/projects:/workspace"],
+        "env": ["NCCL_DEBUG=INFO", "NCCL_IB_DISABLE=0"],
+        "setup_script": "/workspace/my-project/setup_nemo.sh"
+      }
+    }
   }
 }
