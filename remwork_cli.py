@@ -746,6 +746,13 @@ def setup_container(
     _require_running_allocation(remote, name, job_id)
     master = ensure_nodelist_cached(remote, name, job_id)
     extra_env = [f"REM_MASTER={master}"] if master else None
+    nodelist = load_all_allocations().get(name, {}).get("nodelist") or []
+    if not nodelist:
+        print(
+            "Could not resolve allocation nodelist; "
+            "container will only be created on one node.",
+            file=sys.stderr,
+        )
 
     # Use the remote's directory setting to store the sqsh image
     remote_dir = get_remote_directory(remote, data)
@@ -768,10 +775,18 @@ def setup_container(
     # Distribution step creates the final container on every allocated node
     # from the shared ready.sqsh — each node writes to its own local
     # $ENROOT_DATA_PATH, so parallel is safe (no shared-FS race).
-    all_nodes_pfx = (
-        f"srun --jobid={shlex.quote(job_id)} --overlap "
-        f"--ntasks-per-node=1"
-    )
+    # IMPORTANT: with --jobid + --overlap, srun's default --nodes is 1, so
+    # --ntasks-per-node=1 alone will only fan out to one node. Pin --nodes
+    # to the full allocation count so every allocated node runs create.
+    all_nodes_parts = [
+        "srun",
+        f"--jobid={shlex.quote(job_id)}",
+        "--overlap",
+        "--ntasks-per-node=1",
+    ]
+    if nodelist:
+        all_nodes_parts.append(f"--nodes={len(nodelist)}")
+    all_nodes_pfx = " ".join(all_nodes_parts)
     qname = shlex.quote(container_name)
     sqsh = f"{enroot_dir}/{qname}.sqsh"
     ready_sqsh = f"{enroot_dir}/{shlex.quote(container_name + '-ready')}.sqsh"
