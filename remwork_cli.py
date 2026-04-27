@@ -758,7 +758,13 @@ def setup_container(
         sys.exit(1)
     enroot_dir = shlex.quote(remote_dir.rstrip("/") + "/.enroot")
 
-    srun_pfx = f"srun --jobid={shlex.quote(job_id)} --overlap"
+    # Run setup on a single node — image import + container create touch the
+    # shared filesystem, and parallel writes from every node would corrupt the
+    # sqsh file or race on `enroot create`.
+    srun_pfx = (
+        f"srun --jobid={shlex.quote(job_id)} --overlap "
+        f"--nodes=1 --ntasks=1"
+    )
     qname = shlex.quote(container_name)
     sqsh = f"{enroot_dir}/{qname}.sqsh"
 
