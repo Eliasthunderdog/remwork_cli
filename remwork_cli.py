@@ -746,10 +746,10 @@ def setup_container(
     _require_running_allocation(remote, name, job_id)
     master = ensure_nodelist_cached(remote, name, job_id)
     extra_env = [f"REM_MASTER={master}"] if master else None
-    nodelist = load_all_allocations().get(name, {}).get("nodelist") or []
-    if not nodelist:
+    num_nodes = ws.get("allocate", {}).get("nodes")
+    if not num_nodes:
         print(
-            "Could not resolve allocation nodelist; "
+            "No 'allocate.nodes' set in .remworkconf; "
             "container will only be created on one node.",
             file=sys.stderr,
         )
@@ -784,8 +784,8 @@ def setup_container(
         "--overlap",
         "--ntasks-per-node=1",
     ]
-    if nodelist:
-        all_nodes_parts.append(f"--nodes={len(nodelist)}")
+    if num_nodes:
+        all_nodes_parts.append(f"--nodes={int(num_nodes)}")
     all_nodes_pfx = " ".join(all_nodes_parts)
     qname = shlex.quote(container_name)
     sqsh = f"{enroot_dir}/{qname}.sqsh"
