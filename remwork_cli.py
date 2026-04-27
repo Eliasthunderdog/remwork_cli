@@ -758,30 +758,43 @@ def setup_container(
         sys.exit(1)
     enroot_dir = shlex.quote(remote_dir.rstrip("/") + "/.enroot")
 
-    # Run setup on a single node — image import + container create touch the
-    # shared filesystem, and parallel writes from every node would corrupt the
-    # sqsh file or race on `enroot create`.
-    srun_pfx = (
+    # Image import, setup-script, and export run on a single node — image
+    # import touches the shared filesystem, and concurrent enroot create from
+    # multiple nodes would race on $ENROOT_DATA_PATH.
+    one_node_pfx = (
         f"srun --jobid={shlex.quote(job_id)} --overlap "
         f"--nodes=1 --ntasks=1"
     )
+    # Distribution step creates the final container on every allocated node
+    # from the shared ready.sqsh — each node writes to its own local
+    # $ENROOT_DATA_PATH, so parallel is safe (no shared-FS race).
+    all_nodes_pfx = (
+        f"srun --jobid={shlex.quote(job_id)} --overlap "
+        f"--ntasks-per-node=1"
+    )
     qname = shlex.quote(container_name)
     sqsh = f"{enroot_dir}/{qname}.sqsh"
+    ready_sqsh = f"{enroot_dir}/{shlex.quote(container_name + '-ready')}.sqsh"
+
+    total_steps = 4 if setup_script else 2
+    step = 0
+    def _step_label() -> str:
+        return f"[{step}/{total_steps}]"
 
     # ── Step 1: Import image ──
-    # Check if sqsh already exists (on the compute node)
+    step += 1
     check = _ssh_run_capture(
-        remote, f"{srun_pfx} test -f {sqsh} && echo yes || echo no",
+        remote, f"{one_node_pfx} test -f {sqsh} && echo yes || echo no",
     )
     already_imported = "yes" in check.stdout
 
     if already_imported and not force:
-        print(f"[1/3] Image already imported, skipping (use --force to re-import)")
+        print(f"{_step_label()} Image already imported, skipping (use --force to re-import)")
     else:
-        print(f"[1/3] Importing container image: {image}")
+        print(f"{_step_label()} Importing container image: {image}")
         rc = _ssh_run_interactive(
             remote,
-            f"{srun_pfx} bash -c "
+            f"{one_node_pfx} bash -c "
             + shlex.quote(
                 f"mkdir -p {enroot_dir} && "
                 f"enroot import --output {sqsh} docker://{image}"
@@ -791,36 +804,70 @@ def setup_container(
             print("Image import failed.", file=sys.stderr)
             sys.exit(rc)
 
-    # ── Step 2: Create container ──
-    print(f"[2/3] Creating container: {container_name}")
-    rc = _ssh_run_interactive(
-        remote,
-        f"{srun_pfx} bash -c "
-        + shlex.quote(
-            f"enroot remove --force {qname} 2>/dev/null || true; "
-            f"enroot create --name {qname} {sqsh}"
-        ),
-    )
-    if rc != 0:
-        print("Container creation failed.", file=sys.stderr)
-        sys.exit(rc)
-
-    # ── Step 3: Run setup script ──
     if setup_script:
-        print(f"[3/3] Running setup script: {setup_script}")
+        # ── Step 2: Create temp container on setup node to run script in ──
+        step += 1
+        print(f"{_step_label()} Creating container on setup node: {container_name}")
+        rc = _ssh_run_interactive(
+            remote,
+            f"{one_node_pfx} bash -c "
+            + shlex.quote(
+                f"enroot remove --force {qname} 2>/dev/null || true; "
+                f"enroot create --name {qname} {sqsh}"
+            ),
+        )
+        if rc != 0:
+            print("Container creation failed.", file=sys.stderr)
+            sys.exit(rc)
+
+        # ── Step 3: Run setup script (mutates the rootfs on setup node) ──
+        step += 1
+        print(f"{_step_label()} Running setup script: {setup_script}")
         enroot_cmd = _build_enroot_start_cmd(
             {"name": container_name, "mounts": mounts, "env": env_vars},
             [setup_script],
             extra_env=extra_env,
         )
-        rc = _ssh_run_interactive(remote, f"{srun_pfx} {enroot_cmd}")
+        rc = _ssh_run_interactive(remote, f"{one_node_pfx} {enroot_cmd}")
         if rc != 0:
             print("Setup script failed.", file=sys.stderr)
             sys.exit(rc)
-    else:
-        print("[3/3] No setup script specified, skipping.")
 
-    print(f"Container '{container_name}' is ready. Use 'remwork-cli run' to execute commands.")
+        # ── Step 4a: Export the modified container to a shared sqsh ──
+        step += 1
+        print(f"{_step_label()} Exporting container → {ready_sqsh} and distributing to all nodes")
+        rc = _ssh_run_interactive(
+            remote,
+            f"{one_node_pfx} bash -c "
+            + shlex.quote(
+                f"rm -f {ready_sqsh} && "
+                f"enroot export --output {ready_sqsh} {qname}"
+            ),
+        )
+        if rc != 0:
+            print("Container export failed.", file=sys.stderr)
+            sys.exit(rc)
+        distribution_source = ready_sqsh
+    else:
+        step += 1
+        print(f"{_step_label()} No setup script specified — distributing original image to all nodes")
+        distribution_source = sqsh
+
+    # ── Final step: create the container on every allocated node ──
+    # Each node writes to its own local $ENROOT_DATA_PATH; parallel safe.
+    rc = _ssh_run_interactive(
+        remote,
+        f"{all_nodes_pfx} bash -c "
+        + shlex.quote(
+            f"enroot remove --force {qname} 2>/dev/null || true; "
+            f"enroot create --name {qname} {distribution_source}"
+        ),
+    )
+    if rc != 0:
+        print("Per-node container create failed.", file=sys.stderr)
+        sys.exit(rc)
+
+    print(f"Container '{container_name}' is ready on all allocated nodes. Use 'remwork-cli run' to execute commands.")
 
 
 # ── run ──────────────────────────────────────────────────────────────────────
