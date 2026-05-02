@@ -476,6 +476,7 @@ def _build_slurm_resource_args(
     cpus_per_task: Optional[int] = None,
     mem: Optional[str] = None,
     extra_args: Optional[str] = None,
+    passthrough: Optional[List[str]] = None,
 ) -> List[str]:
     """Build Slurm resource arguments common to sbatch/salloc."""
     args = []
@@ -503,6 +504,8 @@ def _build_slurm_resource_args(
         args.extend(["--mem", mem])
     if extra_args:
         args.extend(shlex.split(extra_args))
+    if passthrough:
+        args.extend(passthrough)
     return args
 
 
@@ -531,6 +534,28 @@ def _resolve_slurm_params(
             val = alloc_conf.get(key.replace("_", "-"))
         return val
 
+    # Any key under `allocate` that isn't a known structured field is
+    # forwarded to sbatch as --<key>=<value>. Booleans map to bare flags
+    # (True → --<key>; False → omitted).
+    known_keys = {
+        "partition", "account", "qos", "nodes", "gpus",
+        "gpus_per_node", "gpus-per-node",
+        "ntasks_per_node", "ntasks-per-node",
+        "time", "job_name", "job-name",
+        "cpus_per_task", "cpus-per-task",
+        "mem", "extra_args", "extra-args",
+    }
+    passthrough: List[str] = []
+    for k, v in alloc_conf.items():
+        if k in known_keys or v is None:
+            continue
+        flag = "--" + k.replace("_", "-")
+        if isinstance(v, bool):
+            if v:
+                passthrough.append(flag)
+        else:
+            passthrough.append(f"{flag}={v}")
+
     return {
         "partition": partition or _get("partition"),
         "account": account or _get("account"),
@@ -556,6 +581,7 @@ def _resolve_slurm_params(
         ),
         "mem": mem or _get("mem"),
         "extra_args": extra_args or _get("extra_args"),
+        "passthrough": passthrough,
     }
 
 
